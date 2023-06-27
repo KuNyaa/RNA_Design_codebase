@@ -5,17 +5,18 @@ import argparse
 import json
 from collections import defaultdict
 
-from partition_stoc import all_inside, rand_arr, inside_forward_stoc,inside_forward, inside_forward_pt, sharpturn,score_stack, inside_forward_stoc_pt, inside_forward_pt_stack, inside_forward_stoc_pt_stack
+from partition_stoc import all_inside, rand_arr, inside_forward_stoc,inside_forward, inside_forward_pt, score_stack, inside_forward_stoc_pt, inside_forward_pt_stack, inside_forward_stoc_pt_stack
 
-from partition_torch import inside_forward_stoc_log_torch
+# from partition_torch import inside_forward_stoc_log_torch
 
 import numpy as np
-import torch
+# import torch
 
 import dynet as dy
 
 nucs = 'ACGU'
-pairs_index = [(0, 3), (3, 0), (1, 2), (2, 1), (2, 3), (3, 2)]  # A C G U
+pairs_index = [(0, 3), (3, 0), (1, 2), (2, 1), (2, 3), (3, 2)] 
+unpair_index = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 3), (2, 0), (2, 2), (3, 1), (3, 3)]
 pair2score = {"CG": -3, "GC": -3, "AU": -2, "UA":-2, "GU": -1, "UG":-1}
 unpair_score = 1.
 
@@ -34,9 +35,8 @@ def projection_simplex_np_batch(x, z=1):
     x_proj = np.maximum(x.transpose() - theta[np.arange(len(x)), index], 0)
     return x_proj.transpose()
 
-def inside_forward_pt_stoc_log_dy(s, struct, device='cpu'): # s: n*4 matrix, row sum-to-one; A C G U
+def inside_forward_pt_stoc_log_dy(s, struct, sharpturn, device='cpu'): # s: n*4 matrix, row sum-to-one; A C G U
     # assert len(s) > 1, "the length of rna should be at least 2!"
-    sharpturn = 0
 
     # compute log Q hat
     n = s.dim()[0][0]
@@ -69,22 +69,22 @@ def inside_forward_pt_stoc_log_dy(s, struct, device='cpu'): # s: n*4 matrix, row
     delta_G = dy.scalarInput(0.)
 
     stack = []
-    for i in range(n):
-        if struct[i] == '(':
-            stack.append(i)
-        elif struct[i] == ')':
-            j = stack.pop()
+    for j in range(n):
+        if struct[j] == '(':
+            stack.append(j)
+        elif struct[j] == ')':
+            i = stack.pop()
 
             score_ij = dy.scalarInput(0.)
             
-            for il in range(4):
-                for jr in range(4):
-                    temp_score = dy.scalarInput(1000.)
-                    pair_ij = nucs[il]+nucs[jr]
-                    if (il, jr) in pairs_index:
-                        temp_score = pair2score[pair_ij]
-                    prob = s[i][il]*s[j][jr]
-                    score_ij += prob * temp_score
+            for il, jr in pairs_index:
+                pair_ij = nucs[il]+nucs[jr]
+                prob = s[i][il]*s[j][jr]
+                score_ij += prob * pair2score[pair_ij]
+
+            for il, jr in unpair_index:
+                prob = s[i][il]*s[j][jr]
+                score_ij += prob * dy.scalarInput(100.)
 
             delta_G += score_ij 
         else:
@@ -95,7 +95,7 @@ def inside_forward_pt_stoc_log_dy(s, struct, device='cpu'): # s: n*4 matrix, row
 
     return counts
 
-def min_objective(struct, lr, num_step, init=None, log_last=None, device='cpu'):
+def min_objective(struct, lr, num_step, sharpturn, init=None, log_last=None, device='cpu'):
     l = len(struct)
     m = dy.ParameterCollection()
     ts = m.add_parameters((l, 4))
@@ -103,7 +103,6 @@ def min_objective(struct, lr, num_step, init=None, log_last=None, device='cpu'):
     if init is None:
         # ts.set_value(rand_arr(l))
         ts.set_value(np.full((l, 4), .25)) # Initialize all prob to .25
-        # ts.set_value(np.array([[.15, .40, .40, .05] for i in range(l)]))
     else:
         ts.set_value(init)
 
@@ -111,7 +110,7 @@ def min_objective(struct, lr, num_step, init=None, log_last=None, device='cpu'):
     dy.renew_cg()
     x = dy.scalarInput(0.)
     ts_input = ts + x
-    inside = inside_forward_pt_stoc_log_dy(ts_input, struct, device)
+    inside = inside_forward_pt_stoc_log_dy(ts_input, struct, sharpturn, device)
 
     # set records
     log = [] if log_last is None else log_last
@@ -167,11 +166,11 @@ def min_objective(struct, lr, num_step, init=None, log_last=None, device='cpu'):
     
     return ts, log, time_fw, time_bw
 
-def run(f, s, lr, num_step, device):
+def run(f, s, lr, num_step, sharpturn, device):
     print(f'{f.__name__}: length={len(s)}, lr={lr}, num_step={num_step}, device={device}, sharpturn={sharpturn}')
     
     start = time.time()
-    seq, log, tf, tb = f(s, lr, num_step, device=device)
+    seq, log, tf, tb = f(s, lr, num_step, sharpturn, device=device)
     end = time.time()
     
     import plotext as plt
@@ -200,30 +199,16 @@ if __name__ == '__main__':
     parser.add_argument("--structure", '-s', type=str, default=".")
     parser.add_argument("--lr", type=float, default=0.5)
     parser.add_argument("--step", type=int, default=200)
-    parser.add_argument("--device", '-d', type=str, default="cpu")
     parser.add_argument("--sharpturn", type=int, default=0)
+    parser.add_argument("--device", '-d', type=str, default="cpu")
     args = parser.parse_args()
 
     s = args.structure
     lr = args.lr
     num_step = args.step
+    sharpturn = args.sharpturn
     device = args.device
 
+
     f = min_objective
-    run(f, s, lr, num_step, device)
-    
-    # # compute min objective value for CCCAAAGGG
-    # l = len(s)
-    # m = dy.ParameterCollection()
-    # ts = m.add_parameters((l, 4))
-    # ts.set_value(np.array([[0., 1., 0., 0.],
-    #                        [0., 1., 0., 0.],
-    #                        [0., 1., 0., 0.],
-    #                        [1., 0., 0., 0.],
-    #                        [1., 0., 0., 0.],
-    #                        [1., 0., 0., 0.],
-    #                        [0., 0., 1., 0.],
-    #                        [0., 0., 1., 0.],
-    #                        [0., 0., 1., 0.],]))
-    # count = inside_forward_pt_stoc_log_dy(ts, s, device='cpu')
-    # print(count[0][l-1].value())
+    run(f, s, lr, num_step, sharpturn, device)
