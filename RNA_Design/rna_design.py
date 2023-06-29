@@ -90,8 +90,13 @@ def inside_forward_pt_stoc_log_dy(s, struct, sharpturn, device='cpu'): # s: n*4 
         else:
             delta_G += unpair_score
 
+    print(f"Delta G = {delta_G.value()}")
+    print(f"log Q hat = {counts[0][n-1].value()}")
+
     delta_G /= kT
     counts[0][n-1] += delta_G
+    print(f"Expected Value = {counts[0][n-1].value()}")
+    print()
 
     return counts
 
@@ -110,6 +115,7 @@ def min_objective(struct, lr, num_step, sharpturn, init=None, log_last=None, dev
     dy.renew_cg()
     x = dy.scalarInput(0.)
     ts_input = ts + x
+    # print("Before Training")
     inside = inside_forward_pt_stoc_log_dy(ts_input, struct, sharpturn, device)
 
     # set records
@@ -121,9 +127,8 @@ def min_objective(struct, lr, num_step, sharpturn, init=None, log_last=None, dev
         start_fw = time.time()
         x.set(0.)
 
-        # inside = inside_forward_pt_stoc_log_dy(ts, struct, device)
         count = inside[0][l-1]
-        print(f'step: {epoch: 4d}, log partition: ', count.value())
+        # print(f'step: {epoch: 4d}, log partition: ', count.value())
 
         end_fw= time.time()
         time_fw += end_fw - start_fw
@@ -133,17 +138,28 @@ def min_objective(struct, lr, num_step, sharpturn, init=None, log_last=None, dev
 
         end_bw = time.time()
         time_bw += end_bw - start_bw
+        
+        grad = ts.gradient()
+        # grad = np.array([[74.97251129, 45, 50, 75.53442383], [74.97251129, 50, 45, 75.53442383]]) # CG
+        # grad = np.array([[74.97251129, 75.53442383, 50, 45], [74.97251129, 75.53442383, 45, 50]]) # UG
+        
+        # print("gradient: ")
+        # print(grad)
 
         ts_next = ts.value() - lr*ts.gradient()
+        # ts_next = ts.value() - lr*grad
         ts_next = projection_simplex_np_batch(ts_next)
 
         log.append(count.value())
 
         norm_diff = np.linalg.norm(ts.value()-ts_next)/l
         ts.set_value(ts_next)
+        # print()
         if norm_diff < 1e-10:
             break
     
+    print("After Training")
+    inside = inside_forward_pt_stoc_log_dy(ts_input, struct, sharpturn, device)
 
     print('optimal solution:')
     ts = ts.value()
